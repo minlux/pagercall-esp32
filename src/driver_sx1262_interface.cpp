@@ -121,6 +121,40 @@ void sx1262_interface_debug_print(const char *const fmt, ...)
     Serial.print(buf);
 }
 
+// ---------------------------------------------------------------------------
+// ISR-safe SPI helpers
+// ---------------------------------------------------------------------------
+// SPI.transfer() on ESP32 is a polling hardware register access — no semaphore
+// involved, so it is safe to call from a timer ISR as long as no concurrent
+// SPI transaction is in progress on the main thread.  After pagercall_begin()
+// the main code no longer touches SPI, so there is no race.
+
+static void IRAM_ATTR isr_busy_wait(void)
+{
+    while (digitalRead(BUSY_LoRa)) { }
+}
+
+static void IRAM_ATTR isr_spi_write(uint8_t cmd, uint8_t param, bool has_param)
+{
+    isr_busy_wait();
+    digitalWrite(SS, LOW);
+    SPI.transfer(cmd);
+    if (has_param) SPI.transfer(param);
+    digitalWrite(SS, HIGH);
+}
+
+void IRAM_ATTR sx1262_interface_isr_set_cw(void)
+{
+    isr_spi_write(0xD1, 0, false);       // SetTxContinuousWave
+}
+
+void IRAM_ATTR sx1262_interface_isr_set_standby(void)
+{
+    isr_spi_write(0x80, 0x00, true);     // SetStandby, STDBY_RC
+}
+
+// ---------------------------------------------------------------------------
+
 void sx1262_interface_receive_callback(uint16_t type, uint8_t *buf, uint16_t len)
 {
     switch (type)

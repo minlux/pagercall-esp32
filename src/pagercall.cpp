@@ -1,6 +1,8 @@
 #include <stdint.h>
 #include <Arduino.h>
 #include "pagercall.h"
+#include "driver_sx1262_interface.h"
+#include "driver_sx1262.h"
 
 
 typedef enum {
@@ -16,9 +18,18 @@ typedef enum {
 
 
 // ---------------------------------------------------------------------------
-// GPIO transmit output
+// OOK transmit via SX1262 continuous-wave / standby switching
 // ---------------------------------------------------------------------------
-static const uint8_t  TX_PIN      = 2;
+#define TX_FREQ_HZ  869800000UL  // TODO: set to the actual pager frequency
+
+static sx1262_handle_t gs_sx1262;
+
+static void IRAM_ATTR set_ook_bit(int on)
+{
+    if (on) sx1262_interface_isr_set_cw();
+    else    sx1262_interface_isr_set_standby();
+}
+
 static const uint32_t TX_BAUD     = 4800;
 static const uint32_t TX_REPEATS  = 32;   // number of transmissions per call
 
@@ -83,13 +94,13 @@ static void IRAM_ATTR on_tx_timer()
             const int32_t bit = (byte >> idx) & 1; // Isolate bit
             if (bit != tx_bit_state)
             {
-                digitalWrite(TX_PIN, (uint8_t)bit);
+                set_ook_bit(bit);
                 tx_bit_state = bit;
             }
             break;
         }
         // Switch off
-        digitalWrite(TX_PIN, 0);
+        set_ook_bit(0);
         // Go to hold state
         tx_timer = 0;
         tx_state = TX_STATE_HOLD;
@@ -150,8 +161,41 @@ static uint32_t rtd157_encode_bits(uint8_t * out, const uint32_t in, const uint3
 
 void pagercall_begin()
 {
-    pinMode(TX_PIN, OUTPUT);
-    digitalWrite(TX_PIN, LOW);
+    // Wire up the SX1262 driver handle
+    DRIVER_SX1262_LINK_INIT(&gs_sx1262, sx1262_handle_t);
+    DRIVER_SX1262_LINK_SPI_INIT(&gs_sx1262, sx1262_interface_spi_init);
+    DRIVER_SX1262_LINK_SPI_DEINIT(&gs_sx1262, sx1262_interface_spi_deinit);
+    DRIVER_SX1262_LINK_SPI_WRITE_READ(&gs_sx1262, sx1262_interface_spi_write_read);
+    DRIVER_SX1262_LINK_RESET_GPIO_INIT(&gs_sx1262, sx1262_interface_reset_gpio_init);
+    DRIVER_SX1262_LINK_RESET_GPIO_DEINIT(&gs_sx1262, sx1262_interface_reset_gpio_deinit);
+    DRIVER_SX1262_LINK_RESET_GPIO_WRITE(&gs_sx1262, sx1262_interface_reset_gpio_write);
+    DRIVER_SX1262_LINK_BUSY_GPIO_INIT(&gs_sx1262, sx1262_interface_busy_gpio_init);
+    DRIVER_SX1262_LINK_BUSY_GPIO_DEINIT(&gs_sx1262, sx1262_interface_busy_gpio_deinit);
+    DRIVER_SX1262_LINK_BUSY_GPIO_READ(&gs_sx1262, sx1262_interface_busy_gpio_read);
+    DRIVER_SX1262_LINK_DELAY_MS(&gs_sx1262, sx1262_interface_delay_ms);
+    DRIVER_SX1262_LINK_DEBUG_PRINT(&gs_sx1262, sx1262_interface_debug_print);
+    DRIVER_SX1262_LINK_RECEIVE_CALLBACK(&gs_sx1262, sx1262_interface_receive_callback);
+
+    if (sx1262_init(&gs_sx1262) != 0)
+    {
+        Serial.println("[sx1262] init failed");
+        return;
+    }
+
+    // Set RF frequency
+    uint32_t freq_reg;
+    sx1262_frequency_convert_to_register(&gs_sx1262, TX_FREQ_HZ, &freq_reg);
+    sx1262_set_rf_frequency(&gs_sx1262, freq_reg);
+
+    // PA config: pa_duty_cycle=0x04, hp_max=0x07 → up to ~22 dBm on SX1262
+    sx1262_set_pa_config(&gs_sx1262, 0x04, 0x07);
+
+    // TX power and ramp time (10 µs ramp keeps OOK edges sharp at 4800 baud)
+    sx1262_set_tx_params(&gs_sx1262, 14, SX1262_RAMP_TIME_10US);
+
+    // Start in standby (carrier off)
+    sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
+
     // Timer runs continuously at TX_BAUD Hz; ISR is a no-op while idle
     s_timer = timerBegin(TX_BAUD);
     timerAttachInterrupt(s_timer, &on_tx_timer);

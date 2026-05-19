@@ -162,6 +162,22 @@ void sx1262_interface_debug_print(const char *const fmt, ...);
 void sx1262_interface_receive_callback(uint16_t type, uint8_t *buf, uint16_t len);
 
 /**
+ * @brief  ISR-safe: send SetTxContinuousWave command (0xD1) directly over SPI.
+ *         Bypasses the Arduino SPI semaphore — safe only when this is the sole SPI user.
+ *         Must be called from IRAM_ATTR context.
+ * @note   none
+ */
+void sx1262_interface_isr_set_cw(void);
+
+/**
+ * @brief  ISR-safe: send SetStandby RC command (0x80 0x00) directly over SPI.
+ *         Bypasses the Arduino SPI semaphore — safe only when this is the sole SPI user.
+ *         Must be called from IRAM_ATTR context.
+ * @note   none
+ */
+void sx1262_interface_isr_set_standby(void);
+
+/**
  * @}
  */
 
