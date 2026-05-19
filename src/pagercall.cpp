@@ -21,6 +21,7 @@ typedef enum {
 // OOK transmit via SX1262 continuous-wave / standby switching
 // ---------------------------------------------------------------------------
 #define TX_FREQ_HZ  869800000UL  // TODO: set to the actual pager frequency
+static const uint8_t  TX_DBG_PIN  = 2;    // mirrors OOK pattern for debugging
 
 static sx1262_handle_t gs_sx1262;
 
@@ -28,6 +29,7 @@ static void IRAM_ATTR set_ook_bit(int on)
 {
     if (on) sx1262_interface_isr_set_cw();
     else    sx1262_interface_isr_set_standby();
+    digitalWrite(TX_DBG_PIN, on);
 }
 
 static const uint32_t TX_BAUD     = 4800;
@@ -161,6 +163,10 @@ static uint32_t rtd157_encode_bits(uint8_t * out, const uint32_t in, const uint3
 
 void pagercall_begin()
 {
+    // Debug GPIO mirrors the OOK pattern
+    pinMode(TX_DBG_PIN, OUTPUT);
+    digitalWrite(TX_DBG_PIN, LOW);
+
     // Wire up the SX1262 driver handle
     DRIVER_SX1262_LINK_INIT(&gs_sx1262, sx1262_handle_t);
     DRIVER_SX1262_LINK_SPI_INIT(&gs_sx1262, sx1262_interface_spi_init);
