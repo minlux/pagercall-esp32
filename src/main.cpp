@@ -1,12 +1,14 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <uri/UriBraces.h>
 #include "credentials.h"
 #include "wifi_provisioning.h"
 #include "ota_update.h"
 #include "pagercall.h"
 #include "led.h"
 #include "button.h"
+#include "oled.h"
 
 // ---------------------------------------------------------------------------
 // Hardware pins
@@ -30,6 +32,7 @@ static void enter_provisioning(void)
 {
     s_state = STATE_PROVISIONING;
     led.set(&LED_PAT_SLOW);
+    oled_show_provisioning();
     wifi_provisioning_begin();
 }
 
@@ -37,7 +40,8 @@ static void enter_normal(void)
 {
     s_state = STATE_NORMAL;
 
-    char ssid[128] = {}, pass[128] = {};
+    char ssid[64] = {};
+    char pass[128] = {};
     creds_get_ssid(ssid, sizeof(ssid));
     creds_get_password(pass, sizeof(pass));
 
@@ -48,7 +52,8 @@ static void enter_normal(void)
     static const char *headers[] = {"Content-Length"};
     s_http_server.collectHeaders(headers, 1);
     pagercall_begin();
-    s_http_server.on("/pagercall/{id}", HTTP_GET, []() { pagercall_notify(s_http_server); });
+    s_http_server.on(UriBraces("/pagercall/{}"), HTTP_GET, []() { pagercall_notify(s_http_server); });
+    s_http_server.on(UriBraces("/radio/cw/{}"), HTTP_GET, []() { pagercall_set_cw(s_http_server); });
     s_http_server.on("/firmware", HTTP_PUT, []() { ota_put_firmware(s_http_server); });
     s_http_server.on("/reset", HTTP_GET, []() {
         s_http_server.send(200, "text/plain", "Rebooting...");
@@ -68,11 +73,12 @@ void setup()
 
     led.begin();
     btn.begin();
+    oled_begin();
 
     creds_begin();
 
     // No SSID stored → always provision first, regardless of button.
-    char ssid[8] = {};
+    char ssid[64] = {};
     creds_get_ssid(ssid, sizeof(ssid));
     if (ssid[0] == '\0') {
         enter_provisioning();
@@ -83,11 +89,13 @@ void setup()
     s_state      = STATE_STARTUP;
     s_startup_ts = millis();
     led.set(&LED_PAT_FAST);
+    oled_show_startup();
 }
 
 void loop()
 {
     led.update();
+    oled_update();
 
     switch (s_state) {
 
@@ -103,9 +111,22 @@ void loop()
         wifi_provisioning_loop();
         break;
 
-    case STATE_NORMAL:
-        led.set(WiFi.status() == WL_CONNECTED ? &LED_PAT_TWICE : &LED_PAT_ONCE);
+    case STATE_NORMAL: {
+        bool connected = (WiFi.status() == WL_CONNECTED);
+        led.set(connected ? &LED_PAT_TWICE : &LED_PAT_ONCE);
+
+        static bool s_last_connected = false;
+        if (connected != s_last_connected) {
+            s_last_connected = connected;
+            char ip[16] = {};
+            if (connected) {
+                WiFi.localIP().toString().toCharArray(ip, sizeof(ip));
+            }
+            oled_show_normal(connected, ip);
+        }
+
         s_http_server.handleClient();
         break;
+    }
     }
 }

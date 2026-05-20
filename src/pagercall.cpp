@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <Arduino.h>
 #include "pagercall.h"
+#include "oled.h"
 #include "driver_sx1262_interface.h"
 #include "driver_sx1262.h"
 
@@ -20,8 +21,8 @@ typedef enum {
 // ---------------------------------------------------------------------------
 // OOK transmit via SX1262 continuous-wave / standby switching
 // ---------------------------------------------------------------------------
-#define TX_FREQ_HZ  869800000UL  // TODO: set to the actual pager frequency
-static const uint8_t  TX_DBG_PIN  = 2;    // mirrors OOK pattern for debugging
+#define TX_FREQ_HZ  433920000UL  // 433.92 MHz
+static const uint8_t  TX_DBG_PIN  = 19;    // mirrors OOK pattern for debugging
 
 static sx1262_handle_t gs_sx1262;
 
@@ -60,14 +61,14 @@ static void IRAM_ATTR on_tx_timer()
         {
             const uint32_t tx_request = s_tx_request;
             tx_repetition = tx_request >> 16;
-            tx_bit_numbers = tx_request & 0x1Fu; // for now, we deal with at most 31 bits
+            tx_bit_numbers = tx_request & 0x7Fu; // for now, deal with at most 127 bits (wich is ok, because we expect only 100)!
             tx_timer = 0;
             tx_state = TX_STATE_DELAY;
         }
         break;
 
     case TX_STATE_DELAY:
-        // Wait for setup time to expire
+        // Wait for delay time to expire
         if (++tx_timer >= s_tx_delay_time)
         {
             tx_timer = 0;
@@ -109,7 +110,7 @@ static void IRAM_ATTR on_tx_timer()
         break;
 
     case TX_STATE_HOLD:
-        // Wait for setup time to expire
+        // Wait for hold time to expire
         if (++tx_timer >= TX_HOLD_TIME)
         {
             if (tx_repetition > 0)
@@ -202,12 +203,36 @@ void pagercall_begin()
     // Start in standby (carrier off)
     sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
 
+    // Verify SPI link: chip mode bits [6:4] must be 0x2 (STBY_RC)
+    uint8_t status;
+    if (sx1262_get_status(&gs_sx1262, &status) != 0 || ((status >> 4) & 0x7) != 0x2)
+    {
+        Serial.printf("[sx1262] SPI check failed (status=0x%02X)\n", status);
+        return;
+    }
+    Serial.printf("[sx1262] SPI OK (status=0x%02X)\n", status);
+
     // Timer runs continuously at TX_BAUD Hz; ISR is a no-op while idle
     s_timer = timerBegin(TX_BAUD);
     timerAttachInterrupt(s_timer, &on_tx_timer);
     timerAlarm(s_timer, 1, true, 0);
 }
 
+
+void pagercall_set_cw(WebServer &server)
+{
+    String onOff = server.pathArg(0);
+    if (onOff == "1" || onOff == "on")
+    {
+        sx1262_set_tx_continuous_wave(&gs_sx1262);
+        server.send(200, "text/plain", "CW on");
+    }
+    else
+    {
+        sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
+        server.send(200, "text/plain", "Standby");
+    }
+}
 
 void pagercall_notify(WebServer &server)
 {
@@ -235,9 +260,15 @@ void pagercall_notify(WebServer &server)
             return;
         }
 
+        // Show hint on oled
+        oled_show_calling(id.c_str());
+        // Trigger pager call
         const uint32_t action = 4;
         const uint32_t code   = ((uint32_t)keyboard << 15) | (pager << 5) | action;
         const uint32_t len = rtd157_encode_bits(s_tx_data, code, 25);
+        Serial.printf("[DBG] code=0x%08X  len=%u  s_tx_data=", code, len);
+        for (uint32_t i = 0; i < sizeof(s_tx_data); i++) Serial.printf("%02X ", s_tx_data[i]);
+        Serial.println();
         s_tx_delay_time = 0; // may be set via query parameter
         s_tx_request = (TX_REPEATS << 16) | len;
         server.send(200, "text/plain", "OK: " + id);

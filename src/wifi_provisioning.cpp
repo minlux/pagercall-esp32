@@ -78,11 +78,6 @@ static void send_portal_page(void)
             "<label>Password"
               "<input name='password' type='password' placeholder='Wi-Fi password'>"
             "</label>"
-            "<label>PagerCall Server URL"
-              "<input name='url' type='url'"
-                     "placeholder='https://server.example.com' required>"
-              "<small>The URL of your PagerCall service endpoint.</small>"
-            "</label>"
             "<button type='submit'>Save &amp; Connect</button>"
           "</form>"
         "</body>"
@@ -104,9 +99,8 @@ static void handle_save(void)
 {
     String ssid     = http.arg("ssid");
     String password = http.arg("password");
-    String url      = http.arg("url");
 
-    if (ssid.isEmpty() || url.isEmpty()) {
+    if (ssid.isEmpty()) {
         http.sendHeader("Location", "/");
         http.send(302, "text/plain", "");
         return;
@@ -114,7 +108,6 @@ static void handle_save(void)
 
     creds_set_ssid(ssid.c_str());
     creds_set_password(password.c_str());
-    creds_set_url(url.c_str());
 
     http.send(200, "text/html",
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Saved</title>"
