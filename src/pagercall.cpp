@@ -29,7 +29,7 @@ static sx1262_handle_t gs_sx1262;
 static void IRAM_ATTR set_ook_bit(int on)
 {
     if (on) sx1262_interface_isr_set_cw();
-    else    sx1262_interface_isr_set_standby();
+    else    sx1262_interface_isr_set_fs();
     digitalWrite(TX_DBG_PIN, on);
 }
 
@@ -71,6 +71,7 @@ static void IRAM_ATTR on_tx_timer()
         // Wait for delay time to expire
         if (++tx_timer >= s_tx_delay_time)
         {
+            sx1262_interface_isr_set_fs();  // lock PLL before first CW toggle
             tx_timer = 0;
             tx_state = TX_STATE_SETUP;
         }
@@ -120,6 +121,7 @@ static void IRAM_ATTR on_tx_timer()
                 tx_state = TX_STATE_SETUP;
                 break;
             }
+            sx1262_interface_isr_set_standby();  // power down after last repetition
             s_tx_request = 0;
             tx_state = TX_STATE_IDLE;
         }
@@ -183,34 +185,56 @@ void pagercall_begin()
     DRIVER_SX1262_LINK_DEBUG_PRINT(&gs_sx1262, sx1262_interface_debug_print);
     DRIVER_SX1262_LINK_RECEIVE_CALLBACK(&gs_sx1262, sx1262_interface_receive_callback);
 
-    if (sx1262_init(&gs_sx1262) != 0)
+    uint8_t ret = sx1262_init(&gs_sx1262);
+    if (ret != 0)
     {
         Serial.println("[sx1262] init failed");
         return;
     }
 
+    auto print_status = [&](const char *label, uint8_t rc) {
+        delay(1);
+        uint8_t st;
+        sx1262_get_status(&gs_sx1262, &st);
+        Serial.printf("[sx1262] after %-34s ret=%u  status=0x%02X\n", label, rc, st);
+    };
+
+    print_status("init", ret);
+
+    // DIO3 powers the 1.8 V TCXO; delay 10 ms = 640 × 15.625 µs ticks
+    ret = sx1262_set_dio3_as_tcxo_ctrl(&gs_sx1262, SX1262_TCXO_VOLTAGE_1P8V, 640);
+    print_status("set_dio3_as_tcxo_ctrl", ret);
+
     // Set RF frequency
     uint32_t freq_reg;
     sx1262_frequency_convert_to_register(&gs_sx1262, TX_FREQ_HZ, &freq_reg);
-    sx1262_set_rf_frequency(&gs_sx1262, freq_reg);
+    ret = sx1262_set_rf_frequency(&gs_sx1262, freq_reg);
+    print_status("set_rf_frequency", ret);
 
     // PA config: pa_duty_cycle=0x04, hp_max=0x07 → up to ~22 dBm on SX1262
-    sx1262_set_pa_config(&gs_sx1262, 0x04, 0x07);
+    ret = sx1262_set_pa_config(&gs_sx1262, 0x04, 0x07);
+    print_status("set_pa_config", ret);
+
+    // DIO2 drives the on-board RF switch (required on Heltec V3 for the carrier to reach the antenna)
+    ret = sx1262_set_dio2_as_rf_switch_ctrl(&gs_sx1262, SX1262_BOOL_TRUE);
+    print_status("set_dio2_as_rf_switch_ctrl", ret);
 
     // TX power and ramp time (10 µs ramp keeps OOK edges sharp at 4800 baud)
-    sx1262_set_tx_params(&gs_sx1262, 14, SX1262_RAMP_TIME_10US);
+    ret = sx1262_set_tx_params(&gs_sx1262, 14, SX1262_RAMP_TIME_10US);
+    print_status("set_tx_params", ret);
 
+    ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
+    print_status("set_standby(RC)", ret);
+    delay(100);
+    
+    ret = sx1262_set_tx_continuous_wave(&gs_sx1262);
+    print_status("set_tx_continuous_wave", ret);
+    delay(100);
+    
     // Start in standby (carrier off)
-    sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
-
-    // Verify SPI link: chip mode bits [6:4] must be 0x2 (STBY_RC)
-    uint8_t status;
-    if (sx1262_get_status(&gs_sx1262, &status) != 0 || ((status >> 4) & 0x7) != 0x2)
-    {
-        Serial.printf("[sx1262] SPI check failed (status=0x%02X)\n", status);
-        return;
-    }
-    Serial.printf("[sx1262] SPI OK (status=0x%02X)\n", status);
+    ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
+    print_status("set_standby(XOSC)", ret);
+    delay(100);
 
     // Timer runs continuously at TX_BAUD Hz; ISR is a no-op while idle
     s_timer = timerBegin(TX_BAUD);
@@ -219,18 +243,41 @@ void pagercall_begin()
 }
 
 
-void pagercall_set_cw(WebServer &server)
+void pagercall_set_mode(WebServer &server)
 {
-    String onOff = server.pathArg(0);
-    if (onOff == "1" || onOff == "on")
+    String arg = server.pathArg(0);
+    int mode = arg.toInt();
+
+    switch (mode)
     {
-        sx1262_set_tx_continuous_wave(&gs_sx1262);
-        server.send(200, "text/plain", "CW on");
+    case 0:
+    {
+        uint8_t status = 0;
+        sx1262_get_status(&gs_sx1262, &status);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "0x%02X", status);
+        server.send(200, "text/plain", buf);
+        break;
     }
-    else
-    {
+    case 2:
         sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
-        server.send(200, "text/plain", "Standby");
+        server.send(200, "text/plain", "STBY_RC");
+        break;
+    case 3:
+        sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
+        server.send(200, "text/plain", "STBY_XOSC");
+        break;
+    case 4:
+        sx1262_set_frequency_synthesis(&gs_sx1262);
+        server.send(200, "text/plain", "FS");
+        break;
+    case 6:
+        sx1262_set_tx_continuous_wave(&gs_sx1262);
+        server.send(200, "text/plain", "CW");
+        break;
+    default:
+        server.send(400, "text/plain", "Unknown mode: " + arg);
+        break;
     }
 }
 

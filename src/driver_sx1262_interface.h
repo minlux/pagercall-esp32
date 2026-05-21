@@ -178,6 +178,15 @@ void sx1262_interface_isr_set_cw(void);
 void sx1262_interface_isr_set_standby(void);
 
 /**
+ * @brief  ISR-safe: send SetFs command (0xC1) directly over SPI.
+ *         Puts chip in frequency synthesis mode — PLL stays locked, no carrier emitted.
+ *         Faster transition back to CW than from standby.
+ *         Must be called from IRAM_ATTR context.
+ * @note   none
+ */
+void sx1262_interface_isr_set_fs(void);
+
+/**
  * @}
  */
 

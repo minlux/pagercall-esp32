@@ -53,7 +53,7 @@ static void enter_normal(void)
     s_http_server.collectHeaders(headers, 1);
     pagercall_begin();
     s_http_server.on(UriBraces("/pagercall/{}"), HTTP_GET, []() { pagercall_notify(s_http_server); });
-    s_http_server.on(UriBraces("/radio/cw/{}"), HTTP_GET, []() { pagercall_set_cw(s_http_server); });
+    s_http_server.on(UriBraces("/radio/mode/{}"), HTTP_GET, []() { pagercall_set_mode(s_http_server); });
     s_http_server.on("/firmware", HTTP_PUT, []() { ota_put_firmware(s_http_server); });
     s_http_server.on("/reset", HTTP_GET, []() {
         s_http_server.send(200, "text/plain", "Rebooting...");

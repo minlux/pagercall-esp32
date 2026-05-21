@@ -56,6 +56,7 @@ uint8_t sx1262_interface_spi_deinit(void)
 uint8_t sx1262_interface_spi_write_read(uint8_t *in_buf, uint32_t in_len,
                                         uint8_t *out_buf, uint32_t out_len)
 {
+    while (digitalRead(BUSY_LoRa) == HIGH) {}
     SPI.beginTransaction(SPISettings(SX1262_SPI_FREQ, MSBFIRST, SPI_MODE0));
     digitalWrite(SS, LOW);
     for (uint32_t i = 0; i < in_len; i++) {
@@ -131,6 +132,7 @@ void sx1262_interface_debug_print(const char *const fmt, ...)
 
 static void IRAM_ATTR isr_spi_write(uint8_t cmd, uint8_t param, bool has_param)
 {
+    // while (digitalRead(BUSY_LoRa) == HIGH) {}
     digitalWrite(SS, LOW);
     SPI.transfer(cmd);
     if (has_param) SPI.transfer(param);
@@ -144,7 +146,12 @@ void IRAM_ATTR sx1262_interface_isr_set_cw(void)
 
 void IRAM_ATTR sx1262_interface_isr_set_standby(void)
 {
-    isr_spi_write(0x80, 0x00, true);     // SetStandby, STDBY_RC
+    isr_spi_write(0x80, 0x01, true);     // SetStandby, STDBY_XOSC
+}
+
+void IRAM_ATTR sx1262_interface_isr_set_fs(void)
+{
+    isr_spi_write(0xC1, 0, false);       // SetFs — PLL locked, no carrier
 }
 
 // ---------------------------------------------------------------------------
