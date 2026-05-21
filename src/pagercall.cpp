@@ -6,36 +6,84 @@
 #include "driver_sx1262.h"
 
 
-typedef enum {
-    TX_STATE_IDLE = 0,
-    TX_STATE_DELAY = 1,
-    TX_STATE_SETUP = 2,
-    TX_STATE_TRANSMITTING = 3,
-    TX_STATE_HOLD = 4
-} tx_state_t;
-
-#define TX_SETUP_TIME (0)
-#define TX_HOLD_TIME  (25)
-
 #define TX_FREQ_HZ  433920000UL  // 433.92 MHz
-static const uint8_t  TX_DBG_PIN  = 19;    // mirrors OOK pattern for debugging
-
 static sx1262_handle_t gs_sx1262;
 
-static const uint32_t TX_BAUD     = 4800; // 12943; //3*4800;
-static const uint32_t TX_REPEATS  = 32;   // number of transmissions per call
+// Thread-safe 16-element ring buffer FIFO; packed = (keyboard10<<15)|(pager10<<5)|action5
+#define FIFO_SIZE 16
+static portMUX_TYPE  s_fifo_mux   = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t      s_fifo[FIFO_SIZE];
+static uint32_t      s_fifo_head;   // next write index
+static uint32_t      s_fifo_tail;   // next read index
+static uint32_t      s_fifo_count;
 
-
-static uint8_t  s_tx_data[16];
-static volatile uint32_t s_tx_request; // Upper 16 bits specify the number of repetitions, the lower 16 bits specify the number of bits to transmit (per repetition)
-static volatile uint32_t s_tx_delay_time; // used to delay initial transmission
-
-
-// encode into bytes sent out via a 6N1 inverted uart tx
-static uint32_t rtd157_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t pager10, uint32_t action5)
+bool pagercall_push(uint32_t packed)
 {
-    static constexpr uint8_t lookup2[] = { 0x37, 0x07, 0x34, 0x04};
-    static constexpr uint8_t lookup1[] = { 0x3F, 0x3C }; //only on
+    bool ok = false;
+    portENTER_CRITICAL(&s_fifo_mux);
+    if (s_fifo_count < FIFO_SIZE) {
+        s_fifo[s_fifo_head] = packed;
+        s_fifo_head         = (s_fifo_head + 1) % FIFO_SIZE;
+        s_fifo_count++;
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_fifo_mux);
+    return ok;
+}
+
+bool pagercall_pop(uint32_t *packed)
+{
+    bool ok = false;
+    portENTER_CRITICAL(&s_fifo_mux);
+    if (s_fifo_count > 0) {
+        *packed     = s_fifo[s_fifo_tail];
+        s_fifo_tail = (s_fifo_tail + 1) % FIFO_SIZE;
+        s_fifo_count--;
+        ok = true;
+    }
+    portEXIT_CRITICAL(&s_fifo_mux);
+    return ok;
+}
+
+void pagercall_cw_start(void)
+{
+    sx1262_set_tx_continuous_wave(&gs_sx1262);
+    delay(10);
+}
+
+void pagercall_cw_stop(void)
+{
+    sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
+}
+
+
+// Encode a RTD157 pager call into a byte sequence suitable for direct output via
+// an inverted 6N1 UART, producing a precisely timed OOK bitstream on the TX pin.
+//
+// Encoding principle — 2 input bits → 1 output byte:
+//   Each pair of input bits is mapped to a 6-bit symbol via a lookup table:
+//     input "0" → symbol 1000  (short mark, long space)
+//     input "1" → symbol 1110  (long mark, short space)
+//   Two such 4-bit symbols fill one 8-bit UART data byte (high nibble + low nibble).
+//
+// Why this works with UART 6N1 inverted:
+//   A UART frame with 6 data bits consists of: START(0) + D0..D5 + STOP(1).
+//   With inverted TX the line idles LOW, START is HIGH, STOP is LOW — which
+//   matches the OOK symbols: every symbol starts with a '1' (mark) and ends
+//   with a '0' (space).  The hardware therefore provides the framing bits for
+//   free, and the 6 data bits in between carry the OOK pattern.
+//   Because the TX line is inverted, the data bits are also inverted in
+//   hardware, so the lookup table values are pre-inverted accordingly.
+//   The result is bit-perfect OOK timing driven entirely by the UART baud
+//   clock — no software bit-banging required.
+//
+// Output:
+//   13 bytes written to 'out' (5 keyboard bytes + 5 pager bytes + 3 action bytes).
+//   Returns 13.
+uint32_t pagercall_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t pager10, uint32_t action5)
+{
+    static constexpr uint8_t lookup2[] = { 0x37, 0x07, 0x34, 0x04}; //two bits
+    static constexpr uint8_t lookup1[] = { 0x3F, 0x3C }; //only one bit
 
     // encode 10 keyboard bits
     out[4] = lookup2[keyboard10 & 0x03];
@@ -71,9 +119,6 @@ static uint32_t rtd157_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t
 
 void pagercall_begin()
 {
-    // we will use the TX output as antenna control (instead of DIO2) for the OOK modulation
-    Serial1.begin(4800, SERIAL_6N1, -1, 14, true); // output pattern on GPIO 14
-
     // Wire up the SX1262 driver handle
     DRIVER_SX1262_LINK_INIT(&gs_sx1262, sx1262_handle_t);
     DRIVER_SX1262_LINK_SPI_INIT(&gs_sx1262, sx1262_interface_spi_init);
@@ -89,6 +134,7 @@ void pagercall_begin()
     DRIVER_SX1262_LINK_DEBUG_PRINT(&gs_sx1262, sx1262_interface_debug_print);
     DRIVER_SX1262_LINK_RECEIVE_CALLBACK(&gs_sx1262, sx1262_interface_receive_callback);
 
+    // Initialize the driver
     uint8_t ret = sx1262_init(&gs_sx1262);
     if (ret != 0)
     {
@@ -96,71 +142,39 @@ void pagercall_begin()
         return;
     }
 
-    auto print_status = [&](const char *label, uint8_t rc) {
-        delay(1);
-        uint8_t st;
-        sx1262_get_status(&gs_sx1262, &st);
-        Serial.printf("[sx1262] after %-34s ret=%u  status=0x%02X\n", label, rc, st);
-    };
-
-    print_status("init", ret);
-
     // Enable DC-DC converter (must be called in STBY_RC); reduces core power consumption
-    ret = sx1262_set_regulator_mode(&gs_sx1262, SX1262_REGULATOR_MODE_DC_DC_LDO);
-    print_status("set_regulator_mode(DC_DC)", ret);
+    sx1262_set_regulator_mode(&gs_sx1262, SX1262_REGULATOR_MODE_DC_DC_LDO);
 
     // DIO3 powers the 1.8 V TCXO with an init delay of 10ms
-    ret = sx1262_set_dio3_as_tcxo_ctrl(&gs_sx1262, SX1262_TCXO_VOLTAGE_1P8V, 640);
-    print_status("set_dio3_as_tcxo_ctrl", ret);
+    sx1262_set_dio3_as_tcxo_ctrl(&gs_sx1262, SX1262_TCXO_VOLTAGE_1P8V, 640);
 
     // Set RF frequency
     uint32_t freq_reg;
     sx1262_frequency_convert_to_register(&gs_sx1262, TX_FREQ_HZ, &freq_reg);
-    ret = sx1262_set_rf_frequency(&gs_sx1262, freq_reg);
-    print_status("set_rf_frequency", ret);
+    sx1262_set_rf_frequency(&gs_sx1262, freq_reg);
 
     // PA config: pa_duty_cycle=0x04, hp_max=0x07 → up to ~22 dBm on SX1262
-    ret = sx1262_set_pa_config(&gs_sx1262, 0x04, 0x07);
-    print_status("set_pa_config", ret);
+    sx1262_set_pa_config(&gs_sx1262, 0x04, 0x07);
 
     // TX power and ramp time (10 µs ramp keeps OOK edges sharp at 4800 baud)
-    ret = sx1262_set_tx_params(&gs_sx1262, 14, SX1262_RAMP_TIME_10US);
-    print_status("set_tx_params", ret);
+    sx1262_set_tx_params(&gs_sx1262, 14, SX1262_RAMP_TIME_10US);
 
-    // Start in standby (carrier off)
-    ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
-    print_status("set_standby(XOSC)", ret);
-
-    // POC: reg 0x0580 is "output disable" — try disabling DIO1 output (bit 1, bit 0 = DIO0 n/a)
+#if 1
+    // Disable DIO2 output (note: writing a 1 disables the output)
     uint8_t oe;
     sx1262_get_dio_output_enable(&gs_sx1262, &oe);
-    sx1262_set_dio_output_enable(&gs_sx1262, oe | (1 << 1));
+    sx1262_set_dio_output_enable(&gs_sx1262, oe | (1 << 2));
 
-    // Enable DIO1 input so the chip can sample the signal driven by GPIO 14 via Serial1
-    uint8_t ie;
-    sx1262_get_dio_input_enable(&gs_sx1262, &ie);
-    sx1262_set_dio_input_enable(&gs_sx1262, ie | (1 << 1));
+    // Now init UART1, as we will use the TX output as antenna control (instead of DIO2) for the OOK modulation
+    // I modified the hardware for this, to connect gpio7 to dio2!
+    Serial1.begin(4800, SERIAL_6N1, -1, 7, true); // output pattern on GPIO 7
+#else
+    // Reference: classic DIO2-as-RF-switch approach (chip drives DIO2 HIGH during TX)
+    sx1262_set_dio2_as_rf_switch_ctrl(&gs_sx1262, SX1262_BOOL_TRUE);
+#endif
 
-    // TX bitbang: write 0x06 to 0x0587 (guess: connects DIO1 and DIO2)
-    // and 0x10 to 0x0680 (enables bitbang mode)
-    uint8_t val;
-    val = 0x06; sx1262_write_register(&gs_sx1262, 0x0587, &val, 1);
-    val = 0x10; sx1262_write_register(&gs_sx1262, 0x0680, &val, 1);
-
-    // Read back to confirm writes were accepted
-    uint8_t bb0 = 0, bb1 = 0;
-    sx1262_read_register(&gs_sx1262, 0x0587, &bb0, 1);
-    sx1262_read_register(&gs_sx1262, 0x0680, &bb1, 1);
-    Serial.printf("[sx1262] bitbang regs: 0x0587=0x%02X  0x0680=0x%02X\n", bb0, bb1);
-
-    // Read back all four DIOx registers to observe effect
-    uint8_t reg_oe = 0, reg_ie = 0, reg_pu = 0, reg_pd = 0;
-    sx1262_get_dio_output_enable(&gs_sx1262, &reg_oe);
-    sx1262_get_dio_input_enable(&gs_sx1262, &reg_ie);
-    sx1262_get_pull_up_control(&gs_sx1262, &reg_pu);
-    sx1262_get_pull_down_control(&gs_sx1262, &reg_pd);
-    Serial.printf("[sx1262] DIOx regs: OE=0x%02X IE=0x%02X PU=0x%02X PD=0x%02X\n",
-                  reg_oe, reg_ie, reg_pu, reg_pd);
+    // Start in standby (carrier off)
+    sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
 }
 
 
@@ -179,34 +193,15 @@ void pagercall_notify(WebServer &server)
         return;
     }
 
-    Serial.printf("[pagercall] prefix=%s keyboard=%u pager=%u\n",
-                  prefix, keyboard, pager);
-
     if (strcmp(prefix, "rtd157") == 0)
     {
-        if (s_tx_request != 0)
+        const uint32_t action = 4;
+        uint32_t packed = ((uint32_t)keyboard << 15) | (pager << 5) | action;
+        if (!pagercall_push(packed))
         {
             server.send(503, "text/plain", "Busy");
             return;
         }
-
-        // Show hint on oled
-        oled_show_calling(id.c_str());
-
-        // Enable continous wave
-        sx1262_set_tx_continuous_wave(&gs_sx1262);
-        delay(10);
-
-        // Trigger pager call
-        const uint32_t action = 4;
-        const uint32_t num = rtd157_encode_6n1(s_tx_data, keyboard, pager, action);
-        Serial1.write(s_tx_data, num);
-
-        // Wait until transmission has completed
-        Serial1.flush();
-
-        // Go into standy mode -> carrier off
-        sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
         server.send(200, "text/plain", "OK: " + id);
     }
     else

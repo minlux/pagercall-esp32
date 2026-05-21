@@ -124,6 +124,44 @@ void loop()
             }
 
             s_http_server.handleClient();
+
+            // TX state machine — one repetition per loop() invocation
+            typedef enum { TX_IDLE, TX_RUNNING } tx_sm_t;
+            static tx_sm_t  tx_sm   = TX_IDLE;
+            static uint8_t  tx_buf[16];
+            static uint32_t tx_len;
+            static uint32_t tx_reps;
+
+            switch (tx_sm) {
+            case TX_IDLE: {
+                uint32_t packed;
+                if (pagercall_pop(&packed)) {
+                    const uint32_t keyboard = (packed >> 15) & 0x3FFu;
+                    const uint32_t pager    = (packed >> 5)  & 0x3FFu;
+                    const uint32_t action   = packed & 0x1Fu;
+                    tx_len = pagercall_encode_6n1(tx_buf, keyboard, pager, action);
+                    char call_id[32];
+                    snprintf(call_id, sizeof(call_id), "%u.%u", keyboard, pager);
+                    oled_show_calling(call_id);
+                    Serial.printf("[pagercall] Calling keyboard=%u pager=%u\n",
+                                keyboard, pager);
+                    pagercall_cw_start();
+                    tx_reps = 32;
+                    tx_sm   = TX_RUNNING;
+                }
+                break;
+            }
+            case TX_RUNNING:
+                Serial1.write(tx_buf, tx_len);
+                Serial1.flush();
+                delay(5);
+                if (--tx_reps == 0) {
+                    pagercall_cw_stop();
+                    tx_sm = TX_IDLE;
+                }
+                break;
+            }
+
             break;
         }
     }
