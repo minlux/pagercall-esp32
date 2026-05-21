@@ -25,17 +25,23 @@ Register 0x0583 is an **input enable** register. Writing a `1` to a bit **enable
 
 This is consistent with the name used in library headers ("DIOx input enable").
 
-## 4. DIO2 tristate investigation
+## 4. DIO2 output disable
 
-The goal was to leave DIO2 floating (high-Z) so an external circuit could drive it freely.
+The goal was to leave DIO2 floating (high-Z) so an external circuit could drive it freely, without fighting the chip's output driver.
 
-Findings:
+As established in section 2, register `0x0580` is an **output disable** register: writing a `1` to a bit disables (tristates) the corresponding DIO output driver. Default = `0x00`, meaning all output drivers are **active** after reset.
 
-- Register `0x0580` bit 2 (`0x04`): default = 0, DIO2 output is already disabled after reset — confirmed by reading back `0x08` after init (only DIO3 active due to TCXO ctrl).
-- Register `0x0583`: writing `1<<2` or `1<<1` had no observable effect. DIO2 remains driven.
-- Conclusion from experimentation and community reports: **DIO2 has no software-selectable input mode on the SX1262 silicon.** The output stage cannot be disabled independently of `SetDio2AsRfSwitchCtrl`.
+To disable DIO2's output driver, write `1<<2` (`0x04`) to register `0x0580`:
 
-The note in the Semtech regs header — *"Use only with Semtech-provided code samples"* — and the gap at addresses `0x0581`–`0x0582` suggest this area is intentionally undocumented.
+```cpp
+uint8_t oe;
+sx1262_get_dio_output_enable(&gs_sx1262, &oe);  // reads 0x08 after TCXO init (DIO3 disabled)
+sx1262_set_dio_output_enable(&gs_sx1262, oe | (1 << 2));  // also disable DIO2 → 0x0C
+```
+
+After this, DIO2 is high-Z and an external signal (e.g. ESP32 GPIO 7 via UART TX) can drive the antenna switch control line without contention.
+
+Note: attempts to enable DIO2 as an input via register `0x0583` (`1<<2` or `1<<1`) had no observable effect. True bidirectional input mode for DIO2 does not appear to be supported in silicon. Disabling the output driver via `0x0580` is sufficient for the use case here — we only need to stop the chip from driving the line, not to read it back.
 
 ## 5. TX bitbang / direct mode registers
 
