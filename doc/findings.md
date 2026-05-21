@@ -77,6 +77,14 @@ This would be hardware-assisted OOK, but is **not usable on the Heltec WiFi LoRa
 
 The firmware generates OOK by running the SX1262 in continuous-wave TX mode and routing the data pattern via Serial1 (4800 baud, 6N1 inverted) on GPIO 7 to an external antenna switch connected to DIO2. DIO2's output driver is disabled (0x0580 bit 2 set) so it does not fight the GPIO signal. See `pagercall_encode_6n1()` in `src/pagercall.cpp` for the encoding details.
 
+## 7. Failed OOK approach — FS/CW mode switching
+
+An earlier attempt at OOK modulation alternated the chip between **FS mode** (frequency synthesizer on, no carrier) and **CW mode** (continuous wave, carrier on) to encode mark and space bits.
+
+This worked at **1200 baud**, where each bit period (~833 µs) was long enough to accommodate the mode switch. At higher data rates the approach broke down: the SX1262 asserts **BUSY** for the duration of the mode transition, and the BUSY interval exceeded the bit period. The result was lost bits and corrupted timing.
+
+The approach was abandoned in favour of the UART 6N1 antenna-switch method described in section 6.
+
 ---
 
 ## Sources
