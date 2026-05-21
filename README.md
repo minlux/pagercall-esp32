@@ -28,10 +28,10 @@ pio run --target upload
 PlatformIO auto-detects the port. If detection fails or you have multiple devices connected, specify the port explicitly:
 
 ```bash
-pio run --target upload --upload-port /dev/ttyACM0
+pio run --target upload --upload-port /dev/ttyUSB1
 ```
 
-The Heltec WiFi LoRa 32 V3 uses the ESP32-S3's built-in USB CDC and typically appears as `/dev/ttyACM0` on Linux. If the device is not found, check `dmesg` after plugging in:
+The Heltec WiFi LoRa 32 V3 uses the ESP32-S3's built-in USB CDC and typically appears as `/dev/ttyUSB0` on Linux. If the device is not found, check `dmesg` after plugging in:
 
 ```bash
 dmesg | tail -5
@@ -52,7 +52,7 @@ pio device monitor
 The default baud rate is 115200. To specify a different baud rate explicitly:
 
 ```bash
-pio device monitor --baud 115200
+pio device monitor --baud 115200 --port /dev/ttyUSB1
 ```
 
 The monitor can also be combined with upload in one step:

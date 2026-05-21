@@ -14,7 +14,6 @@
 // Hardware pins
 // ---------------------------------------------------------------------------
 static const uint8_t LED_PIN = 35;
-static const uint8_t BSY_IND_PIN = 20;
 static const uint8_t BTN_PIN = 0;   // active-LOW, internal pull-up
 
 // static Led       led(LED_PIN);
@@ -54,8 +53,7 @@ static void enter_normal(void)
     s_http_server.collectHeaders(headers, 1);
     pagercall_begin();
     s_http_server.on(UriBraces("/pagercall/{}"), HTTP_GET, []() { pagercall_notify(s_http_server); });
-    s_http_server.on(UriBraces("/radio/mode/{}"), HTTP_GET, []() { pagercall_set_mode(s_http_server); });
-    s_http_server.on("/firmware", HTTP_PUT, []() { ota_put_firmware(s_http_server); });
+    // s_http_server.on("/firmware", HTTP_PUT, []() { ota_put_firmware(s_http_server); });
     s_http_server.on("/reset", HTTP_GET, []() {
         s_http_server.send(200, "text/plain", "Rebooting...");
         s_http_server.client().clear();
@@ -71,11 +69,6 @@ static void enter_normal(void)
 void setup()
 {
     Serial.begin(115200);
-    Serial1.begin(4800, SERIAL_6N1, -1, 7, true); // output pattern on GPIO 7
-
-    // Debug GPIO mirrors the lora busy pin
-    pinMode(BSY_IND_PIN, OUTPUT);
-    digitalWrite(BSY_IND_PIN, LOW);
 
     // led.begin();
     btn.begin();
@@ -134,7 +127,4 @@ void loop()
             break;
         }
     }
-
-    // copy lora-busy pin to a debug pin
-    digitalWrite(BSY_IND_PIN, digitalRead(BUSY_LoRa));
 }
