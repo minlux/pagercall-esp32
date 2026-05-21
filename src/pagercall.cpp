@@ -26,14 +26,34 @@ static const uint8_t  TX_DBG_PIN  = 19;    // mirrors OOK pattern for debugging
 
 static sx1262_handle_t gs_sx1262;
 
+// ESP32-S3 SPI2 (FSPI) registers — direct access bypasses Arduino SPI driver overhead
+#define GPSPI2_BASE     0x60024000UL
+#define GPSPI2_CMD_REG  (*(volatile uint32_t *)(GPSPI2_BASE + 0x000))
+#define GPSPI2_MS_DLEN  (*(volatile uint32_t *)(GPSPI2_BASE + 0x024))
+#define GPSPI2_W0       (*(volatile uint32_t *)(GPSPI2_BASE + 0x098))
+#define GPSPI2_USR_BIT  (1u << 24)
+
 static void IRAM_ATTR set_ook_bit(int on)
 {
-    if (on) sx1262_interface_isr_set_cw();
-    else    sx1262_interface_isr_set_fs();
-    digitalWrite(TX_DBG_PIN, on);
+    digitalWrite(35, digitalRead(BUSY_LoRa));  // LED shows BUSY state on entry
+
+    digitalWrite(TX_DBG_PIN, LOW);
+    digitalWrite(SS, LOW);
+    GPSPI2_MS_DLEN     = 7;                    // 8 bits - 1
+    GPSPI2_W0          = on ? 0xD1u : 0xC1u;   // SetTxContinuousWave or SetFs
+    GPSPI2_CMD_REG    |= GPSPI2_USR_BIT;       // trigger
+    while (GPSPI2_CMD_REG & GPSPI2_USR_BIT) {} // wait for completion
+    digitalWrite(SS, HIGH);
+    digitalWrite(TX_DBG_PIN, HIGH);
+#if 0
+    digitalWrite(TX_DBG_PIN, 1);
+    while (digitalRead(BUSY_LoRa)) {} // wait for completion
+    digitalWrite(TX_DBG_PIN, 0);
+#endif
+    // digitalWrite(TX_DBG_PIN, on);
 }
 
-static const uint32_t TX_BAUD     = 4800;
+static const uint32_t TX_BAUD     = 4800; // 12943; //3*4800;
 static const uint32_t TX_REPEATS  = 32;   // number of transmissions per call
 
 static hw_timer_t *s_timer = nullptr;
@@ -52,6 +72,28 @@ static void IRAM_ATTR on_tx_timer()
     static uint32_t tx_bit_number;  // current bit number (downcounting)
     static int32_t  tx_bit_state;   // last transmitted bit state
     static uint32_t tx_timer; //upcounting
+#if 0
+    static uint32_t divider3;
+    // static uint32_t ook_off;
+
+    // deal with delayed switch on (because of hw)
+    // by switching off delayed in sw
+    ++divider3;
+    if (divider3 >= 3)
+    {
+        divider3 = 0;
+        goto execute; //run only every 3rd call
+    }
+    // if ((divider3 == 1) && ook_off)
+    // {
+    //     ook_off = 0;
+    //     set_ook_bit(0);
+    // }
+    return;
+
+
+execute:
+#endif
 
     switch (tx_state)
     {
@@ -71,7 +113,6 @@ static void IRAM_ATTR on_tx_timer()
         // Wait for delay time to expire
         if (++tx_timer >= s_tx_delay_time)
         {
-            sx1262_interface_isr_set_fs();  // lock PLL before first CW toggle
             tx_timer = 0;
             tx_state = TX_STATE_SETUP;
         }
@@ -84,6 +125,7 @@ static void IRAM_ATTR on_tx_timer()
             tx_bit_state = -1;
             tx_bit_number = tx_bit_numbers;
             tx_state = TX_STATE_TRANSMITTING;
+            sx1262_interface_isr_set_fs();  // lock PLL before first CW toggle
         }
         break;
 
@@ -98,7 +140,14 @@ static void IRAM_ATTR on_tx_timer()
             const int32_t bit = (byte >> idx) & 1; // Isolate bit
             if (bit != tx_bit_state)
             {
-                set_ook_bit(bit);
+                // if (bit)
+                {
+                    set_ook_bit(bit); // switch immediately
+                }
+                // else
+                // {
+                //     ook_off = 1; // scheduled delayed switch off
+                // }
                 tx_bit_state = bit;
             }
             break;
@@ -121,9 +170,9 @@ static void IRAM_ATTR on_tx_timer()
                 tx_state = TX_STATE_SETUP;
                 break;
             }
-            sx1262_interface_isr_set_standby();  // power down after last repetition
             s_tx_request = 0;
             tx_state = TX_STATE_IDLE;
+            sx1262_interface_isr_set_standby();  // power down after last repetition
         }
         break;
     }
@@ -164,11 +213,53 @@ static uint32_t rtd157_encode_bits(uint8_t * out, const uint32_t in, const uint3
 }
 
 
+// encode into bytes sent out via a 6N1 inverted uart tx
+static uint32_t rtd157_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t pager10, uint32_t action5)
+{
+    static constexpr uint8_t lookup2[] = { 0x37, 0x07, 0x34, 0x04};
+    static constexpr uint8_t lookup1[] = { 0x3F, 0x3C }; //only on
+
+    // encode 10 keyboard bits
+    out[4] = lookup2[keyboard10 & 0x03];
+    keyboard10 >>= 2;
+    out[3] = lookup2[keyboard10 & 0x03];
+    keyboard10 >>= 2;
+    out[2] = lookup2[keyboard10 & 0x03];
+    keyboard10 >>= 2;
+    out[1] = lookup2[keyboard10 & 0x03];
+    keyboard10 >>= 2;
+    out[0] = lookup2[keyboard10 & 0x03];
+    // encode 10 pager bits
+    out[9] = lookup2[pager10 & 0x03];
+    pager10 >>= 2;
+    out[8] = lookup2[pager10 & 0x03];
+    pager10 >>= 2;
+    out[7] = lookup2[pager10 & 0x03];
+    pager10 >>= 2;
+    out[6] = lookup2[pager10 & 0x03];
+    pager10 >>= 2;
+    out[5] = lookup2[pager10 & 0x03];
+    // encode 5 action bits
+    out[12] = lookup1[action5 & 0x01];
+    action5 >>= 1;
+    out[11] = lookup2[action5 & 0x03];
+    action5 >>= 2;
+    out[10] = lookup2[action5 & 0x03];
+
+    // return number of ecoded bytes
+    return 13;
+}
+
+
 void pagercall_begin()
 {
     // Debug GPIO mirrors the OOK pattern
     pinMode(TX_DBG_PIN, OUTPUT);
-    digitalWrite(TX_DBG_PIN, LOW);
+    // digitalWrite(TX_DBG_PIN, LOW);
+
+    // LED (GPIO 35) reflects BUSY state on each set_ook_bit() call
+    pinMode(35, OUTPUT);
+    digitalWrite(35, LOW);
 
     // Wire up the SX1262 driver handle
     DRIVER_SX1262_LINK_INIT(&gs_sx1262, sx1262_handle_t);
@@ -201,8 +292,18 @@ void pagercall_begin()
 
     print_status("init", ret);
 
-    // DIO3 powers the 1.8 V TCXO; delay 10 ms = 640 × 15.625 µs ticks
-    ret = sx1262_set_dio3_as_tcxo_ctrl(&gs_sx1262, SX1262_TCXO_VOLTAGE_1P8V, 640);
+    // Enable DC-DC converter (must be called in STBY_RC); reduces core power consumption
+    ret = sx1262_set_regulator_mode(&gs_sx1262, SX1262_REGULATOR_MODE_DC_DC_LDO);
+    print_status("set_regulator_mode(DC_DC)", ret);
+
+    // DIO3 powers the 1.8 V TCXO.
+    // This delay is applied on EVERY entry into FS/TX/RX mode, not just cold start.
+    // With 640 ticks (10 ms) BUSY stays HIGH far longer than a single bit period
+    // (208–416 µs), so the ISR always sees BUSY=1. Use the minimum that keeps the
+    // TCXO stable on a warm re-entry. 4 ticks = 62.5 µs is plenty for a warm TCXO;
+    // true cold-start (first power-on) is handled by the boot sequence above which
+    // calls SetTx once before starting the ISR timer, giving the TCXO time to settle.
+    ret = sx1262_set_dio3_as_tcxo_ctrl(&gs_sx1262, SX1262_TCXO_VOLTAGE_1P8V, 4);
     print_status("set_dio3_as_tcxo_ctrl", ret);
 
     // Set RF frequency
@@ -226,11 +327,11 @@ void pagercall_begin()
     ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_RC_13M);
     print_status("set_standby(RC)", ret);
     delay(100);
-    
+
     ret = sx1262_set_tx_continuous_wave(&gs_sx1262);
     print_status("set_tx_continuous_wave", ret);
     delay(100);
-    
+
     // Start in standby (carrier off)
     ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
     print_status("set_standby(XOSC)", ret);
@@ -311,6 +412,10 @@ void pagercall_notify(WebServer &server)
         oled_show_calling(id.c_str());
         // Trigger pager call
         const uint32_t action = 4;
+    #if 1
+        const uint32_t num = rtd157_encode_6n1(s_tx_data, keyboard, pager, action);
+        Serial1.write(s_tx_data, num);
+    #endif
         const uint32_t code   = ((uint32_t)keyboard << 15) | (pager << 5) | action;
         const uint32_t len = rtd157_encode_bits(s_tx_data, code, 25);
         Serial.printf("[DBG] code=0x%08X  len=%u  s_tx_data=", code, len);

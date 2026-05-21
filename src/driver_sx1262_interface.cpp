@@ -35,12 +35,16 @@
 //   SS=8, SCK=9, MISO=11, MOSI=10  (SPI bus, matches Arduino defaults for this board)
 //   RST_LoRa=12, BUSY_LoRa=13
 
-#define SX1262_SPI_FREQ  8000000UL  // 8 MHz conservative default; SX1262 supports up to 16 MHz
+#define SX1262_SPI_FREQ  12000000UL  // 12 MHz conservative default; SX1262 supports up to 16 MHz
+
+#warning wieder raus!
+#define TX_DBG_PIN 19
 
 uint8_t sx1262_interface_spi_init(void)
 {
     pinMode(SS, OUTPUT);
     digitalWrite(SS, HIGH);
+    digitalWrite(TX_DBG_PIN, HIGH);
     SPI.begin(SCK, MISO, MOSI, SS);
     return 0;
 }
@@ -58,6 +62,7 @@ uint8_t sx1262_interface_spi_write_read(uint8_t *in_buf, uint32_t in_len,
 {
     while (digitalRead(BUSY_LoRa) == HIGH) {}
     SPI.beginTransaction(SPISettings(SX1262_SPI_FREQ, MSBFIRST, SPI_MODE0));
+    digitalWrite(TX_DBG_PIN, LOW);
     digitalWrite(SS, LOW);
     for (uint32_t i = 0; i < in_len; i++) {
         SPI.transfer(in_buf[i]);
@@ -66,6 +71,7 @@ uint8_t sx1262_interface_spi_write_read(uint8_t *in_buf, uint32_t in_len,
         out_buf[i] = SPI.transfer(0x00);
     }
     digitalWrite(SS, HIGH);
+    digitalWrite(TX_DBG_PIN, HIGH);
     SPI.endTransaction();
     return 0;
 }
@@ -133,10 +139,12 @@ void sx1262_interface_debug_print(const char *const fmt, ...)
 static void IRAM_ATTR isr_spi_write(uint8_t cmd, uint8_t param, bool has_param)
 {
     // while (digitalRead(BUSY_LoRa) == HIGH) {}
+    digitalWrite(TX_DBG_PIN, LOW);
     digitalWrite(SS, LOW);
     SPI.transfer(cmd);
     if (has_param) SPI.transfer(param);
     digitalWrite(SS, HIGH);
+    digitalWrite(TX_DBG_PIN, HIGH);
 }
 
 void IRAM_ATTR sx1262_interface_isr_set_cw(void)
@@ -152,6 +160,19 @@ void IRAM_ATTR sx1262_interface_isr_set_standby(void)
 void IRAM_ATTR sx1262_interface_isr_set_fs(void)
 {
     isr_spi_write(0xC1, 0, false);       // SetFs — PLL locked, no carrier
+}
+
+void IRAM_ATTR sx1262_interface_isr_set_rx(void)
+{
+    // SetRx with timeout=0 (continuous RX, no timeout)
+    digitalWrite(TX_DBG_PIN, LOW);
+    digitalWrite(SS, LOW);
+    SPI.transfer(0x82);
+    SPI.transfer(0x00);  // timeout[23:16]
+    SPI.transfer(0x00);  // timeout[15:8]
+    SPI.transfer(0x00);  // timeout[7:0]
+    digitalWrite(SS, HIGH);
+    digitalWrite(TX_DBG_PIN, HIGH);
 }
 
 // ---------------------------------------------------------------------------

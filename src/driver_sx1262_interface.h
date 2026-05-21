@@ -187,6 +187,14 @@ void sx1262_interface_isr_set_standby(void);
 void sx1262_interface_isr_set_fs(void);
 
 /**
+ * @brief  ISR-safe: send SetRx command (0x82) with timeout=0 directly over SPI.
+ *         Puts chip in continuous RX mode — PA off, no carrier emitted.
+ *         Must be called from IRAM_ATTR context.
+ * @note   none
+ */
+void sx1262_interface_isr_set_rx(void);
+
+/**
  * @}
  */
 
