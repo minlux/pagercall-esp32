@@ -72,7 +72,7 @@ static uint32_t rtd157_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t
 void pagercall_begin()
 {
     // we will use the TX output as antenna control (instead of DIO2) for the OOK modulation
-    Serial1.begin(4800, SERIAL_6N1, -1, 7, true); // output pattern on GPIO 7
+    Serial1.begin(4800, SERIAL_6N1, -1, 14, true); // output pattern on GPIO 14
 
     // Wire up the SX1262 driver handle
     DRIVER_SX1262_LINK_INIT(&gs_sx1262, sx1262_handle_t);
@@ -131,6 +131,36 @@ void pagercall_begin()
     ret = sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
     print_status("set_standby(XOSC)", ret);
 
+    // POC: reg 0x0580 is "output disable" — try disabling DIO1 output (bit 1, bit 0 = DIO0 n/a)
+    uint8_t oe;
+    sx1262_get_dio_output_enable(&gs_sx1262, &oe);
+    sx1262_set_dio_output_enable(&gs_sx1262, oe | (1 << 1));
+
+    // Enable DIO1 input so the chip can sample the signal driven by GPIO 14 via Serial1
+    uint8_t ie;
+    sx1262_get_dio_input_enable(&gs_sx1262, &ie);
+    sx1262_set_dio_input_enable(&gs_sx1262, ie | (1 << 1));
+
+    // TX bitbang: write 0x06 to 0x0587 (guess: connects DIO1 and DIO2)
+    // and 0x10 to 0x0680 (enables bitbang mode)
+    uint8_t val;
+    val = 0x06; sx1262_write_register(&gs_sx1262, 0x0587, &val, 1);
+    val = 0x10; sx1262_write_register(&gs_sx1262, 0x0680, &val, 1);
+
+    // Read back to confirm writes were accepted
+    uint8_t bb0 = 0, bb1 = 0;
+    sx1262_read_register(&gs_sx1262, 0x0587, &bb0, 1);
+    sx1262_read_register(&gs_sx1262, 0x0680, &bb1, 1);
+    Serial.printf("[sx1262] bitbang regs: 0x0587=0x%02X  0x0680=0x%02X\n", bb0, bb1);
+
+    // Read back all four DIOx registers to observe effect
+    uint8_t reg_oe = 0, reg_ie = 0, reg_pu = 0, reg_pd = 0;
+    sx1262_get_dio_output_enable(&gs_sx1262, &reg_oe);
+    sx1262_get_dio_input_enable(&gs_sx1262, &reg_ie);
+    sx1262_get_pull_up_control(&gs_sx1262, &reg_pu);
+    sx1262_get_pull_down_control(&gs_sx1262, &reg_pd);
+    Serial.printf("[sx1262] DIOx regs: OE=0x%02X IE=0x%02X PU=0x%02X PD=0x%02X\n",
+                  reg_oe, reg_ie, reg_pu, reg_pd);
 }
 
 
