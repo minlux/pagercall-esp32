@@ -11,11 +11,24 @@ static sx1262_handle_t gs_sx1262;
 
 // Thread-safe 16-element ring buffer FIFO; packed = (keyboard10<<15)|(pager10<<5)|action5
 #define FIFO_SIZE 16
-static portMUX_TYPE  s_fifo_mux   = portMUX_INITIALIZER_UNLOCKED;
+static portMUX_TYPE  s_fifo_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t      s_fifo[FIFO_SIZE];
 static uint32_t      s_fifo_head;   // next write index
 static uint32_t      s_fifo_tail;   // next read index
 static uint32_t      s_fifo_count;
+
+
+// FIFO for pending transmissions; packed = (keyboard10 << 10) | pager10
+static bool pagercall_push(uint32_t packed);   // returns false if full
+static bool pagercall_pop(uint32_t *packed);   // returns false if empty
+
+// static void pagercall_cw_start(void);  // enable CW carrier
+// static void pagercall_cw_stop(void);   // return to standby (carrier off)
+
+// Encode a call into a 13-byte Serial1 sequence; returns byte count
+static uint32_t pagercall_encode_6n1(uint8_t out[13], uint32_t keyboard10, uint32_t pager10, uint32_t action5);
+
+
 
 bool pagercall_push(uint32_t packed)
 {
@@ -45,15 +58,16 @@ bool pagercall_pop(uint32_t *packed)
     return ok;
 }
 
-void pagercall_cw_start(void)
+static inline void pagercall_cw_start(void)
 {
     sx1262_set_tx_continuous_wave(&gs_sx1262);
-    delay(10);
+    delay(20);
 }
 
-void pagercall_cw_stop(void)
+static inline void pagercall_cw_stop(void)
 {
     sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
+    delay(20);
 }
 
 
@@ -173,11 +187,51 @@ void pagercall_begin()
     sx1262_set_dio2_as_rf_switch_ctrl(&gs_sx1262, SX1262_BOOL_TRUE);
 #endif
 
-    // Start in standby (carrier off)
+    // Start in standby (carrier off), already powering the external 32 MHz oscillator
     sx1262_set_standby(&gs_sx1262, SX1262_CLOCK_SOURCE_XTAL_32MHZ);
 }
 
 
+void pagercall_update(void)
+{
+    typedef enum { TX_IDLE, TX_RUNNING } tx_sm_t;
+    static tx_sm_t  tx_sm = TX_IDLE;
+    static uint8_t  tx_buf[16];
+    static uint32_t tx_len;
+    static uint32_t tx_reps;
+
+    switch (tx_sm) {
+    case TX_IDLE: {
+        uint32_t packed;
+        if (pagercall_pop(&packed)) {
+            const uint32_t keyboard = (packed >> 15) & 0x3FFu;
+            const uint32_t pager    = (packed >> 5)  & 0x3FFu;
+            const uint32_t action   = packed & 0x1Fu;
+            tx_len = pagercall_encode_6n1(tx_buf, keyboard, pager, action);
+            char call_id[32];
+            snprintf(call_id, sizeof(call_id), "%u.%u", keyboard, pager);
+            oled_show_calling(call_id);
+            Serial.printf("[pagercall] Calling keyboard=%u pager=%u\n", keyboard, pager);
+            pagercall_cw_start();
+            tx_reps = 32; // repetition counter to transmit the entire frame 32x
+            tx_sm = TX_RUNNING;
+        }
+        break;
+    }
+    case TX_RUNNING:
+        Serial1.write(tx_buf, tx_len); // transmission of 23 bytes @ 4k8 6N1 takes about ~22ms
+        Serial1.flush(); // wait until all bytes was transmitted
+        delay(4); // wait an extra, inter-frame delay of ~5ms
+        if (--tx_reps == 0) {
+            pagercall_cw_stop();
+            tx_sm = TX_IDLE;
+        }
+        break;
+    }
+}
+
+
+// curl -i 192.168.178.119/pagercall/rtd157-274.1
 void pagercall_notify(WebServer &server)
 {
     String id = server.pathArg(0);
