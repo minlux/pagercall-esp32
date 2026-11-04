@@ -4,6 +4,7 @@
 #include <WiFi.h>
 #include <WebServer.h>
 #include <DNSServer.h>
+#include <cJSON.h>
 
 // ---------------------------------------------------------------------------
 // Configuration
@@ -60,6 +61,8 @@ static void send_portal_page(void)
                      "border-radius: 4px; font-size: 1em; cursor: pointer; }"
             "button:hover { background: #0051c3; }"
             "small { color: #666; }"
+            ".check { display: flex; gap: 8px; align-items: center; font-weight: normal; }"
+            ".check input { width: auto; margin: 0; }"
           "</style>"
         "</head>"
         "<body>"
@@ -78,6 +81,23 @@ static void send_portal_page(void)
             "<label>Password"
               "<input name='password' type='password' placeholder='Wi-Fi password'>"
             "</label>"
+            "<label>Update token (optional)"
+              "<input name='ota_token' type='text' autocomplete='off' placeholder='";
+
+    char token[CREDS_TOKEN_SIZE_MAX + 1];
+    creds_get_ota_token(token, sizeof(token));
+    html += token[0] ? "Token stored (unchanged)" : "No token stored";
+
+    html +=
+              "'>"
+              "<small>Token of this target on the update server (Souper). Leave empty to keep it.</small>"
+            "</label>";
+    if (token[0]) {
+        html +=
+            "<label class='check'><input name='ota_token_delete' type='checkbox' value='1'>"
+              "Delete stored token</label>";
+    }
+    html +=
             "<button type='submit'>Save &amp; Connect</button>"
           "</form>"
         "</body>"
@@ -95,10 +115,24 @@ static void handle_root(void)
     send_portal_page();
 }
 
+static void send_error_page(const char *reason)
+{
+    String html =
+        "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Error</title>"
+        "<style>body{font-family:sans-serif;text-align:center;margin-top:60px;}</style>"
+        "</head><body>"
+        "<h1>Not saved</h1><p>";
+    html += reason;  // fixed texts of creds_patch()
+    html += "</p><p><a href='/'>Back</a></p></body></html>";
+    http.send(400, "text/html", html);
+}
+
 static void handle_save(void)
 {
     String ssid     = http.arg("ssid");
     String password = http.arg("password");
+    String token    = http.arg("ota_token");
+    token.trim();
 
     if (ssid.isEmpty()) {
         http.sendHeader("Location", "/");
@@ -106,8 +140,23 @@ static void handle_save(void)
         return;
     }
 
-    creds_set_ssid(ssid.c_str());
-    creds_set_password(password.c_str());
+    // same rules as PUT /credentials
+    cJSON *json = cJSON_CreateObject();
+    cJSON_AddStringToObject(json, "ssid", ssid.c_str());
+    cJSON_AddStringToObject(json, "password", password.c_str());
+    if (!token.isEmpty()) {
+        cJSON_AddStringToObject(json, "ota_token", token.c_str());
+    } else if (http.hasArg("ota_token_delete")) {
+        cJSON_AddNullToObject(json, "ota_token");
+    }
+    char *body = cJSON_PrintUnformatted(json);
+    cJSON_Delete(json);
+    const char *error = body ? creds_apply(body, strlen(body)) : "Out of memory";
+    cJSON_free(body);
+    if (error) {
+        send_error_page(error);
+        return;
+    }
 
     http.send(200, "text/html",
         "<!DOCTYPE html><html><head><meta charset='utf-8'><title>Saved</title>"
@@ -149,6 +198,12 @@ void wifi_provisioning_begin(void)
 
     http.on("/",      HTTP_GET,  handle_root);
     http.on("/save",  HTTP_POST, handle_save);
+    http.on("/reset", HTTP_GET,  []() {
+        http.send(200, "text/plain", "Rebooting...");
+        delay(200);
+        ESP.restart();
+    });
+    creds_register(http);  // PUT/DELETE /credentials, also in the setup portal (then GET /reset)
     http.onNotFound(handle_redirect);
     http.begin();
 }

@@ -5,6 +5,9 @@
 #include "credentials.h"
 #include "wifi_provisioning.h"
 #include "ota_update.h"
+#include "ota_flash.h"
+#include "souper.h"
+#include "version.h"
 #include "pagercall.h"
 #include "led.h"
 #include "button.h"
@@ -48,11 +51,18 @@ static void enter_normal(void)
     WiFi.setAutoReconnect(true);
     WiFi.begin(ssid, pass);
 
-    static const char *headers[] = {"Content-Length"};
-    s_http_server.collectHeaders(headers, 1);
+    static const char *headers[] = {"Content-Length", "Content-Type"};
+    s_http_server.collectHeaders(headers, 2);
     pagercall_begin();
     s_http_server.on(UriBraces("/pagercall/{}"), HTTP_GET, []() { pagercall_notify(s_http_server); });
-    // s_http_server.on("/firmware", HTTP_PUT, []() { ota_put_firmware(s_http_server); });
+    s_http_server.on("/version", HTTP_GET, []() {
+        String json = String("{\"version\":\"") + PAGERCALL_VERSION_STR + "\",\"git\":\"" + pagercall_git_rev +
+                      "\",\"build\":\"" + pagercall_build_time + "\"}";
+        s_http_server.send(200, "application/json", json);
+    });
+    ota_update_register(s_http_server);   // PUT /firmware
+    creds_register(s_http_server);        // PUT/DELETE /credentials
+    souper_register(s_http_server);       // GET /ota, POST /ota/poll
     s_http_server.on("/reset", HTTP_GET, []() {
         s_http_server.send(200, "text/plain", "Rebooting...");
         s_http_server.client().clear();
@@ -60,6 +70,8 @@ static void enter_normal(void)
         esp_restart();
     });
     s_http_server.begin();
+
+    souper_begin();  // update server: polls only, if a token is stored
 }
 
 // ---------------------------------------------------------------------------
@@ -68,6 +80,7 @@ static void enter_normal(void)
 void setup()
 {
     Serial.begin(115200);
+    Serial.printf("PagerCall %s (%s, %s)\n", PAGERCALL_VERSION_STR, pagercall_git_rev, pagercall_build_time);
 
     // led.begin();
     btn.begin();
@@ -124,6 +137,25 @@ void loop()
 
             s_http_server.handleClient();
             pagercall_update();
+
+            // firmware update: show the download, restart into the new firmware as soon as no call is pending
+            static uint32_t s_display_ts = 0;
+            static int      s_last_progress = -1;
+            static bool     s_restart_shown = false;
+            if (ota_restart_pending()) {
+                if (!s_restart_shown) {
+                    s_restart_shown = true;
+                    oled_show_restart();
+                }
+            } else if (millis() - s_display_ts >= 500) {
+                s_display_ts = millis();
+                const int progress = souper_progress();
+                if (progress != s_last_progress) {
+                    s_last_progress = progress;
+                    oled_show_update(progress);
+                }
+            }
+            ota_restart_loop(pagercall_idle());
 
             break;
         }

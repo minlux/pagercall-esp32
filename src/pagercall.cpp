@@ -4,6 +4,7 @@
 #include "oled.h"
 #include "driver_sx1262_interface.h"
 #include "driver_sx1262.h"
+#include "ota_flash.h"
 
 
 #define TX_FREQ_HZ  433920000UL  // 433.92 MHz
@@ -192,10 +193,21 @@ void pagercall_begin()
 }
 
 
+typedef enum { TX_IDLE, TX_RUNNING } tx_sm_t;
+static volatile tx_sm_t tx_sm = TX_IDLE;
+
+
+bool pagercall_idle(void)
+{
+    portENTER_CRITICAL(&s_fifo_mux);
+    const bool empty = (s_fifo_count == 0);
+    portEXIT_CRITICAL(&s_fifo_mux);
+    return empty && (tx_sm == TX_IDLE);
+}
+
+
 void pagercall_update(void)
 {
-    typedef enum { TX_IDLE, TX_RUNNING } tx_sm_t;
-    static tx_sm_t  tx_sm = TX_IDLE;
     static uint8_t  tx_buf[16];
     static uint32_t tx_len;
     static uint32_t tx_reps;
@@ -244,6 +256,13 @@ void pagercall_notify(WebServer &server)
     if (sscanf(id.c_str(), "%31[^-]-%u.%u", prefix, &keyboard, &pager) != 3)
     {
         server.send(400, "text/plain", "Bad id: " + id);
+        return;
+    }
+
+    if (ota_restart_pending())
+    {
+        // a new firmware is installed: the restart waits, until all calls are sent. accept no new ones
+        server.send(503, "text/plain", "Restarting for a firmware update");
         return;
     }
 

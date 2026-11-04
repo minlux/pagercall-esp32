@@ -14,6 +14,7 @@ static Adafruit_SSD1306 s_display(128, 64, &s_wire, OLED_RST);
 
 static bool     s_calling    = false;
 static uint32_t s_calling_ts = 0;
+static bool     s_update     = false;  // update screen shown (download or restart)
 static bool     s_connected  = false;
 static char     s_ip[16]     = {};
 
@@ -72,7 +73,7 @@ void oled_show_normal(bool connected, const char *ip)
     s_connected = connected;
     strncpy(s_ip, ip ? ip : "", sizeof(s_ip) - 1);
 
-    if (s_calling) return;
+    if (s_calling || s_update) return;
 
     header("PagerCall");
     s_display.setCursor(0, 16);
@@ -98,6 +99,42 @@ void oled_show_calling(const char *id)
     s_display.setTextSize(2);
     s_display.println(id);
     s_display.setTextSize(1);
+    flush();
+}
+
+void oled_show_update(int progress)
+{
+    if (progress < 0) {
+        if (s_update) {
+            s_update = false;
+            oled_show_normal(s_connected, s_ip);
+        }
+        return;
+    }
+    s_update = true;
+    if (s_calling) return;
+
+    header("PagerCall");
+    s_display.setCursor(0, 16);
+    s_display.println("Firmware update");
+    s_display.println();
+    s_display.printf("Download %d %%\n", progress);
+    s_display.drawRect(0, 44, 128, 10, SSD1306_WHITE);
+    s_display.fillRect(2, 46, (124 * progress) / 100, 6, SSD1306_WHITE);
+    flush();
+}
+
+void oled_show_restart()
+{
+    s_update = true;
+    s_calling = false;
+
+    header("PagerCall");
+    s_display.setCursor(0, 16);
+    s_display.println("Firmware update");
+    s_display.println();
+    s_display.println("Installed,");
+    s_display.println("restarting...");
     flush();
 }
 
